@@ -7,6 +7,7 @@
 #include <sddl.h>
 
 void Log(const std::wstring& msg) { std::wcout << L"[*] " << msg << std::endl; }
+void LogError(const std::wstring& msg) { std::wcerr << L"[!] " << msg << L" (Error: " << GetLastError() << L")" << std::endl; }
 
 bool SetAppContainerPermissions(std::wstring dllPath) {
     PSECURITY_DESCRIPTOR pSD = NULL;
@@ -14,7 +15,7 @@ bool SetAppContainerPermissions(std::wstring dllPath) {
     EXPLICIT_ACCESSW ea;
     PSID pSid = NULL;
     if (GetNamedSecurityInfoW(dllPath.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pOldDACL, NULL, &pSD) != ERROR_SUCCESS) return false;
-    ConvertStringSidToSidW(L"S-1-15-2-1", &pSid);
+    if (!ConvertStringSidToSidW(L"S-1-15-2-1", &pSid)) return false;
     ZeroMemory(&ea, sizeof(EXPLICIT_ACCESSW));
     ea.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
     ea.grfAccessMode = SET_ACCESS;
@@ -22,7 +23,7 @@ bool SetAppContainerPermissions(std::wstring dllPath) {
     ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
     ea.Trustee.ptstrName = (LPWSTR)pSid;
-    SetEntriesInAclW(1, &ea, pOldDACL, &pNewDACL);
+    if (SetEntriesInAclW(1, &ea, pOldDACL, &pNewDACL) != ERROR_SUCCESS) return false;
     SetNamedSecurityInfoW((LPWSTR)dllPath.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, pNewDACL, NULL);
     if (pSid) FreeSid(pSid);
     if (pNewDACL) LocalFree(pNewDACL);
@@ -47,19 +48,22 @@ void KillProcess(std::wstring processName) {
     DWORD pid = GetProcessIdByName(processName);
     if (pid != 0) {
         HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
-        if (hProc) { TerminateProcess(hProc, 0); CloseHandle(hProc); Log(L"BreeZip wurde beendet."); }
+        if (hProc) { TerminateProcess(hProc, 0); CloseHandle(hProc); Log(L"Prozess beendet."); }
     }
 }
 
 bool Inject(DWORD pid, std::wstring dllPath) {
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) return false;
+    if (!hProcess) { LogError(L"OpenProcess fehlgeschlagen"); return false; }
     void* pLibPath = VirtualAllocEx(hProcess, NULL, (dllPath.length() + 1) * sizeof(wchar_t), MEM_COMMIT, PAGE_READWRITE);
-    WriteProcessMemory(hProcess, pLibPath, dllPath.c_str(), (dllPath.length() + 1) * sizeof(wchar_t), NULL);
+    if (!pLibPath) { LogError(L"VirtualAllocEx fehlgeschlagen"); CloseHandle(hProcess); return false; }
+    if (!WriteProcessMemory(hProcess, pLibPath, dllPath.c_str(), (dllPath.length() + 1) * sizeof(wchar_t), NULL)) { LogError(L"WriteProcessMemory fehlgeschlagen"); CloseHandle(hProcess); return false; }
     HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryW"), pLibPath, 0, NULL);
-    if (hThread) { WaitForSingleObject(hThread, INFINITE); CloseHandle(hThread); }
+    if (!hThread) { LogError(L"CreateRemoteThread fehlgeschlagen"); CloseHandle(hProcess); return false; }
+    WaitForSingleObject(hThread, INFINITE);
+    CloseHandle(hThread);
     CloseHandle(hProcess);
-    return hThread != NULL;
+    return true;
 }
 
 int main() {
@@ -67,21 +71,21 @@ int main() {
     std::wstring dllPath = L"C:\\temp\\breezip_hook.dll";
     std::vector<DWORD> injectedPids;
 
-    std::wcout << L"=== OMNI-INJECTOR v4.0 (Watchdog + Auto-Kill) ===" << std::endl;
-    Log(L"Druecke 'K' um BreeZip zu killen (macht die DLL frei).");
+    std::wcout << L"=== FINAL-INJECTOR v4.2 (UWP Support) ===" << std::endl;
+    Log(L"Lass dieses Fenster offen. Druecke 'K' zum Beenden von BreeZip.");
 
-    SetAppContainerPermissions(dllPath);
+    if (!SetAppContainerPermissions(dllPath)) LogError(L"DLL Berechtigungen konnten nicht gesetzt werden");
 
     while (true) {
         if (GetAsyncKeyState('K') & 0x8000) KillProcess(processName);
-
         DWORD pid = GetProcessIdByName(processName);
         if (pid != 0) {
             bool already = false;
             for (DWORD p : injectedPids) if (p == pid) already = true;
             if (!already) {
-                Log(L"BreeZip erkannt. Injiziere...");
+                Log(L"BreeZip gefunden. Injiziere...");
                 if (Inject(pid, dllPath)) { Log(L"ERFOLG!"); injectedPids.push_back(pid); }
+                else { LogError(L"Injection fehlgeschlagen!"); }
             }
         } else { injectedPids.clear(); }
         Sleep(500);
