@@ -9,11 +9,23 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Data.Json.h>
 
+// --- LINKER FIXES ---
 #pragma comment(lib, "runtimeobject.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 
 using namespace winrt;
 using namespace Windows::Data::Json;
 using namespace Windows::Foundation;
+
+// --- HELPER FÜR KONVERTIERUNG (Beseitigt Warnung C4244) ---
+std::string WStringToString(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
 
 // --- CONFIG CACHE ---
 bool g_ForcePremium = false;
@@ -54,7 +66,7 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool 
             std::wstring ws(nStr);
             if (ws.find(L"Premium") != std::wstring::npos || ws.find(L"active") != std::wstring::npos || ws.find(L"pro") != std::wstring::npos) {
                 *value = true;
-                Logger::Log("[OMNI] JSON Bool '" + std::string(ws.begin(), ws.end()) + "' -> TRUE");
+                Logger::Log("[OMNI] JSON Bool '" + WStringToString(ws) + "' -> TRUE");
             }
         }
     }
@@ -71,7 +83,7 @@ HRESULT WINAPI Detour_RoActivateInstance(HSTRING activatableClassId, IInspectabl
         PCWSTR classStr = WindowsGetStringRawBuffer(activatableClassId, nullptr);
         if (classStr) {
             std::wstring ws(classStr);
-            Logger::Log("[ACTIVATE] " + std::string(ws.begin(), ws.end()));
+            Logger::Log("[ACTIVATE] " + WStringToString(ws));
             if (ws == L"Windows.Data.Json.JsonObject") {
                 void** vtable = *(void***)*instance;
                 MH_CreateHook(vtable[12], &Detour_GetNamedBoolean, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedBoolean));
@@ -90,7 +102,7 @@ HRESULT WINAPI Detour_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWO
     StringFromCLSID(rclsid, &clsidStr);
     if (clsidStr) {
         std::wstring ws(clsidStr);
-        Logger::Log("[COM] CoCreateInstance CLSID: " + std::string(ws.begin(), ws.end()));
+        Logger::Log("[COM] CoCreateInstance CLSID: " + WStringToString(ws));
         CoTaskMemFree(clsidStr);
     }
     return pOriginal_CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv);
@@ -98,8 +110,8 @@ HRESULT WINAPI Detour_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWO
 
 void HookThread() {
     Logger::Init("C:\\temp\\breezip_analysis.log");
-    Logger::Log("=== BreeZip v4.2 'Final Hunter' gestartet ===");
-    Sleep(2000); // AV Bypass
+    Logger::Log("=== BreeZip v4.2.1 'Fixed Hunter' gestartet ===");
+    Sleep(2000);
     MH_Initialize();
 
     HMODULE hCombase = GetModuleHandleA("combase.dll");
@@ -115,8 +127,6 @@ void HookThread() {
         MH_CreateHook(pCoCreate, &Detour_CoCreateInstance, reinterpret_cast<LPVOID*>(&pOriginal_CoCreateInstance));
         MH_EnableHook(pCoCreate);
     }
-
-    Logger::Log("[ULTIMATE] Final Hunter scharfgeschaltet.");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
