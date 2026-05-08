@@ -9,16 +9,17 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Data.Json.h>
 
-// --- LINKER FIXES ---
 #pragma comment(lib, "runtimeobject.lib")
 #pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "oleaut32.lib")
 
 using namespace winrt;
 using namespace Windows::Data::Json;
 using namespace Windows::Foundation;
 
-// --- HELPER FÜR KONVERTIERUNG (Beseitigt Warnung C4244) ---
+// --- LINKER ---
+#pragma comment(lib, "ole32.lib")
+
+// --- HELPER ---
 std::string WStringToString(const std::wstring& wstr) {
     if (wstr.empty()) return std::string();
     int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
@@ -54,6 +55,21 @@ extern "C" {
 }
 
 // --- JSON DETOURS ---
+
+// get_Value (Index 7) - Hilfreich um zu sehen WELCHE Keys abgefragt werden
+typedef HRESULT (STDMETHODCALLTYPE *GetNamedValue_t)(void* This, HSTRING name, void** value);
+GetNamedValue_t pOriginal_GetNamedValue = nullptr;
+
+HRESULT STDMETHODCALLTYPE Detour_GetNamedValue(void* This, HSTRING name, void** value) {
+    HRESULT hr = pOriginal_GetNamedValue(This, name, value);
+    if (name) {
+        PCWSTR nStr = WindowsGetStringRawBuffer(name, nullptr);
+        if (nStr) Logger::Log("[JSON-KEY] Abfrage: " + WStringToString(nStr));
+    }
+    return hr;
+}
+
+// GetNamedBoolean (Index 12)
 typedef HRESULT (STDMETHODCALLTYPE *GetNamedBoolean_t)(void* This, HSTRING name, bool *value);
 GetNamedBoolean_t pOriginal_GetNamedBoolean = nullptr;
 
@@ -66,7 +82,7 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool 
             std::wstring ws(nStr);
             if (ws.find(L"Premium") != std::wstring::npos || ws.find(L"active") != std::wstring::npos || ws.find(L"pro") != std::wstring::npos) {
                 *value = true;
-                Logger::Log("[OMNI] JSON Bool '" + WStringToString(ws) + "' -> TRUE");
+                Logger::Log("[MANIPULATION] JSON Bool '" + WStringToString(ws) + "' -> TRUE");
             }
         }
     }
@@ -88,6 +104,9 @@ HRESULT WINAPI Detour_RoActivateInstance(HSTRING activatableClassId, IInspectabl
                 void** vtable = *(void***)*instance;
                 MH_CreateHook(vtable[12], &Detour_GetNamedBoolean, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedBoolean));
                 MH_EnableHook(vtable[12]);
+                MH_CreateHook(vtable[7], &Detour_GetNamedValue, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedValue));
+                MH_EnableHook(vtable[7]);
+                Logger::Log("[HOOK] JSON Key-Tracker & Manipulation aktiv.");
             }
         }
     }
@@ -110,7 +129,7 @@ HRESULT WINAPI Detour_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWO
 
 void HookThread() {
     Logger::Init("C:\\temp\\breezip_analysis.log");
-    Logger::Log("=== BreeZip v4.2.1 'Fixed Hunter' gestartet ===");
+    Logger::Log("=== BreeZip v4.3 'Key Hunter' gestartet ===");
     Sleep(2000);
     MH_Initialize();
 
