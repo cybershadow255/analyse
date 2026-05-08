@@ -26,23 +26,41 @@ std::string WStringToString(const std::wstring& wstr) {
     return strTo;
 }
 
-std::wstring GetConfigPath() {
-    wchar_t tempPath[MAX_PATH]; GetTempPathW(MAX_PATH, tempPath);
-    return std::wstring(tempPath) + L"breezip_config.txt";
+// Base64 URL Decoder (JWT Format)
+std::string DecodeBase64URL(std::string input) {
+    // URL-Safe Base64 zu Standard Base64 konvertieren
+    for (auto& c : input) {
+        if (c == '-') c = '+';
+        if (c == '_') c = '/';
+    }
+    while (input.length() % 4) input += '=';
+
+    static const std::string b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    std::vector<int> T(256, -1);
+    for (int i = 0; i < 64; i++) T[b64[i]] = i;
+    int val = 0, valb = -8;
+    for (unsigned char c : input) {
+        if (c == '=') break;
+        if (T[c] == -1) continue;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back(char((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
 }
 
-bool g_ForcePremium = false;
-bool g_BlockInternet = false;
-void UpdateConfig() {
-    static DWORD lastCheck = 0;
-    if (GetTickCount() - lastCheck < 2000) return;
-    std::ifstream config(GetConfigPath());
-    std::string line;
-    while (std::getline(config, line)) {
-        if (line == "true") g_ForcePremium = true;
-        if (line == "block") g_BlockInternet = true;
+void AnalyzeJWT(const std::string& token) {
+    size_t firstDot = token.find('.');
+    size_t secondDot = token.find('.', firstDot + 1);
+    if (firstDot != std::string::npos && secondDot != std::string::npos) {
+        std::string payload = token.substr(firstDot + 1, secondDot - firstDot - 1);
+        std::string decoded = DecodeBase64URL(payload);
+        Logger::Log("[JWT-DECODED] " + decoded);
     }
-    lastCheck = GetTickCount();
 }
 
 // --- MINHOOK ---
@@ -53,83 +71,80 @@ extern "C" {
     MH_STATUS WINAPI MH_EnableHook(LPVOID pTarget);
 }
 
-std::set<void*> g_Hooks;
-void SafeHook(void* target, void* detour, void** original) {
-    if (!target) return;
-    if (MH_CreateHook(target, detour, original) == MH_OK) MH_EnableHook(target);
-}
+// --- DETOURS ---
+typedef HRESULT (STDMETHODCALLTYPE *GetNamedString_t)(void* This, HSTRING name, HSTRING *value);
+GetNamedString_t pOriginal_GetNamedString = nullptr;
 
-// --- JSON DETOURS ---
-typedef HRESULT (STDMETHODCALLTYPE *GetNamedBoolean_t)(void* This, HSTRING name, bool *value);
-GetNamedBoolean_t pOriginal_GetNamedBoolean = nullptr;
-HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool *value) {
-    HRESULT hr = pOriginal_GetNamedBoolean(This, name, value);
-    if (SUCCEEDED(hr) && name) {
+HRESULT STDMETHODCALLTYPE Detour_GetNamedString(void* This, HSTRING name, HSTRING *value) {
+    HRESULT hr = pOriginal_GetNamedString(This, name, value);
+    if (SUCCEEDED(hr) && name && value && *value) {
         PCWSTR nStr = WindowsGetStringRawBuffer(name, nullptr);
-        if (nStr) {
-            UpdateConfig();
-            if (g_ForcePremium) {
-                std::wstring ws(nStr);
-                if (ws.find(L"Premium") != std::wstring::npos || ws.find(L"active") != std::wstring::npos || ws.find(L"IsProtected") != std::wstring::npos) {
-                    *value = true;
-                    Logger::Log("[SPOOF] JSON Bool '" + WStringToString(ws) + "' -> TRUE");
-                }
+        PCWSTR vStr = WindowsGetStringRawBuffer(*value, nullptr);
+        if (nStr && vStr) {
+            std::string key = WStringToString(nStr);
+            std::string val = WStringToString(vStr);
+            Logger::Log("[JSON-STRING] " + key + " = \"" + (val.length() > 60 ? val.substr(0, 60) + "..." : val) + "\"");
+
+            if (key == "key" && val.find("ey") == 0) AnalyzeJWT(val);
+
+            // Manipulation: Wenn status abgefragt wird und der Wert negativ ist
+            if (key == "status" && (val == "expired" || val == "none")) {
+                WindowsDeleteString(*value);
+                WindowsCreateString(L"active", 6, value);
+                Logger::Log("[SPOOF] status '" + val + "' -> 'active'");
             }
         }
     }
     return hr;
 }
 
-// --- HTTP BLOCKER (The Wall) ---
-typedef HRESULT (STDMETHODCALLTYPE *SendRequestAsync_t)(void* This, void* request, void** operation);
-SendRequestAsync_t pOriginal_SendRequestAsync = nullptr;
-HRESULT STDMETHODCALLTYPE Detour_SendRequestAsync(void* This, void* request, void** operation) {
-    UpdateConfig();
-    if (g_BlockInternet) {
-        Logger::Log("[WALL] Internet-Anfrage blockiert!");
-        return HRESULT_FROM_WIN32(ERROR_INTERNET_CANNOT_CONNECT);
+typedef HRESULT (STDMETHODCALLTYPE *GetNamedBoolean_t)(void* This, HSTRING name, bool *value);
+GetNamedBoolean_t pOriginal_GetNamedBoolean = nullptr;
+
+HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool *value) {
+    HRESULT hr = pOriginal_GetNamedBoolean(This, name, value);
+    if (name) {
+        PCWSTR nStr = WindowsGetStringRawBuffer(name, nullptr);
+        if (nStr) {
+            std::wstring ws(nStr);
+            if (ws == L"IsProtected") {
+                *value = true;
+                Logger::Log("[SPOOF] IsProtected -> TRUE");
+            }
+        }
     }
-    return pOriginal_SendRequestAsync(This, request, operation);
+    return hr;
 }
 
 // --- ACTIVATION ---
-void HookInstance(void* instance, const std::wstring& name) {
-    void** vtable = *(void***)instance;
-    if (name == L"Windows.Data.Json.JsonObject") {
-        SafeHook(vtable[12], &Detour_GetNamedBoolean, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedBoolean));
-    } else if (name == L"Windows.Web.Http.Filters.HttpBaseProtocolFilter") {
-        SafeHook(vtable[13], &Detour_SendRequestAsync, reinterpret_cast<LPVOID*>(&pOriginal_SendRequestAsync));
-        Logger::Log("[WALL] HTTP-Filter gehookt (Index 13).");
-    }
-}
-
 typedef HRESULT (WINAPI *RoActivateInstance_t)(HSTRING activatableClassId, IInspectable** instance);
 RoActivateInstance_t pOriginal_RoActivateInstance = nullptr;
+
 HRESULT WINAPI Detour_RoActivateInstance(HSTRING activatableClassId, IInspectable** instance) {
     HRESULT hr = pOriginal_RoActivateInstance(activatableClassId, instance);
     if (SUCCEEDED(hr) && instance && *instance && activatableClassId) {
         PCWSTR classStr = WindowsGetStringRawBuffer(activatableClassId, nullptr);
-        if (classStr) {
-            std::wstring ws(classStr);
-            Logger::Log("[ACTIVATE] " + WStringToString(ws));
-            HookInstance(*instance, ws);
+        if (classStr && std::wstring(classStr) == L"Windows.Data.Json.JsonObject") {
+            void** vtable = *(void***)*instance;
+            MH_CreateHook(vtable[10], &Detour_GetNamedString, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedString));
+            MH_EnableHook(vtable[10]);
+            MH_CreateHook(vtable[12], &Detour_GetNamedBoolean, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedBoolean));
+            MH_EnableHook(vtable[12]);
         }
     }
     return hr;
 }
 
 void HookThread() {
-    wchar_t logP[MAX_PATH]; GetTempPathW(MAX_PATH, logP);
-    Logger::Init(WStringToString(logP) + "breezip_analysis.log");
-    Logger::Log("=== BreeZip v8.1 'THE WALL' GESTARTET ===");
-    Sleep(2000);
+    Logger::Init("C:\\temp\\breezip_analysis.log");
+    Logger::Log("=== BreeZip v9.0 'CLAIM ANALYST' gestartet ===");
     MH_Initialize();
     HMODULE hCombase = GetModuleHandleA("combase.dll");
     if (hCombase) {
         void* pRoAct = GetProcAddress(hCombase, "RoActivateInstance");
-        SafeHook(pRoAct, &Detour_RoActivateInstance, reinterpret_cast<LPVOID*>(&pOriginal_RoActivateInstance));
+        MH_CreateHook(pRoAct, &Detour_RoActivateInstance, reinterpret_cast<LPVOID*>(&pOriginal_RoActivateInstance));
+        MH_EnableHook(pRoAct);
     }
-    Logger::Log("[ULTIMATE] Nexus-Hooks aktiv.");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
