@@ -16,9 +16,6 @@ using namespace winrt;
 using namespace Windows::Data::Json;
 using namespace Windows::Foundation;
 
-// --- LINKER ---
-#pragma comment(lib, "ole32.lib")
-
 // --- HELPER ---
 std::string WStringToString(const std::wstring& wstr) {
     if (wstr.empty()) return std::string();
@@ -54,17 +51,30 @@ extern "C" {
     MH_STATUS WINAPI MH_EnableHook(LPVOID pTarget);
 }
 
-// --- JSON DETOURS ---
+// --- JSON DETOURS (THE DATA MINER) ---
 
-// get_Value (Index 7) - Hilfreich um zu sehen WELCHE Keys abgefragt werden
-typedef HRESULT (STDMETHODCALLTYPE *GetNamedValue_t)(void* This, HSTRING name, void** value);
-GetNamedValue_t pOriginal_GetNamedValue = nullptr;
+// GetNamedString (Index 10)
+typedef HRESULT (STDMETHODCALLTYPE *GetNamedString_t)(void* This, HSTRING name, HSTRING *value);
+GetNamedString_t pOriginal_GetNamedString = nullptr;
 
-HRESULT STDMETHODCALLTYPE Detour_GetNamedValue(void* This, HSTRING name, void** value) {
-    HRESULT hr = pOriginal_GetNamedValue(This, name, value);
-    if (name) {
+HRESULT STDMETHODCALLTYPE Detour_GetNamedString(void* This, HSTRING name, HSTRING *value) {
+    HRESULT hr = pOriginal_GetNamedString(This, name, value);
+    if (SUCCEEDED(hr) && name && value && *value) {
         PCWSTR nStr = WindowsGetStringRawBuffer(name, nullptr);
-        if (nStr) Logger::Log("[JSON-KEY] Abfrage: " + WStringToString(nStr));
+        PCWSTR vStr = WindowsGetStringRawBuffer(*value, nullptr);
+        if (nStr && vStr) {
+            std::wstring wn(nStr), wv(vStr);
+            Logger::Log("[JSON-STRING] " + WStringToString(wn) + " = \"" + WStringToString(wv) + "\"");
+
+            UpdateConfig();
+            if (g_ForcePremium && (wn == L"Value" || wn == L"status")) {
+                if (wv == L"none" || wv == L"false" || wv == L"expired") {
+                    WindowsDeleteString(*value);
+                    WindowsCreateString(L"active", 6, value);
+                    Logger::Log("[MANIPULATION] JSON String '" + WStringToString(wn) + "' auf 'active' gesetzt!");
+                }
+            }
+        }
     }
     return hr;
 }
@@ -77,10 +87,12 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool 
     HRESULT hr = pOriginal_GetNamedBoolean(This, name, value);
     if (SUCCEEDED(hr) && name) {
         PCWSTR nStr = WindowsGetStringRawBuffer(name, nullptr);
-        UpdateConfig();
-        if (g_ForcePremium && nStr) {
+        if (nStr) {
             std::wstring ws(nStr);
-            if (ws.find(L"Premium") != std::wstring::npos || ws.find(L"active") != std::wstring::npos || ws.find(L"pro") != std::wstring::npos) {
+            Logger::Log("[JSON-BOOL] " + WStringToString(ws) + " = " + std::string(*value ? "TRUE" : "FALSE"));
+
+            UpdateConfig();
+            if (g_ForcePremium && (ws == L"IsProtected" || ws == L"active" || ws.find(L"Premium") != std::wstring::npos)) {
                 *value = true;
                 Logger::Log("[MANIPULATION] JSON Bool '" + WStringToString(ws) + "' -> TRUE");
             }
@@ -99,14 +111,13 @@ HRESULT WINAPI Detour_RoActivateInstance(HSTRING activatableClassId, IInspectabl
         PCWSTR classStr = WindowsGetStringRawBuffer(activatableClassId, nullptr);
         if (classStr) {
             std::wstring ws(classStr);
-            Logger::Log("[ACTIVATE] " + WStringToString(ws));
             if (ws == L"Windows.Data.Json.JsonObject") {
                 void** vtable = *(void***)*instance;
+                MH_CreateHook(vtable[10], &Detour_GetNamedString, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedString));
+                MH_EnableHook(vtable[10]);
                 MH_CreateHook(vtable[12], &Detour_GetNamedBoolean, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedBoolean));
                 MH_EnableHook(vtable[12]);
-                MH_CreateHook(vtable[7], &Detour_GetNamedValue, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedValue));
-                MH_EnableHook(vtable[7]);
-                Logger::Log("[HOOK] JSON Key-Tracker & Manipulation aktiv.");
+                Logger::Log("[HOOK] JSON Data-Miner aktiv.");
             }
         }
     }
@@ -129,7 +140,7 @@ HRESULT WINAPI Detour_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWO
 
 void HookThread() {
     Logger::Init("C:\\temp\\breezip_analysis.log");
-    Logger::Log("=== BreeZip v4.3 'Key Hunter' gestartet ===");
+    Logger::Log("=== BreeZip v4.4 'The Data Miner' gestartet ===");
     Sleep(2000);
     MH_Initialize();
 
