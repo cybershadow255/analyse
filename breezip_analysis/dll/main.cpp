@@ -28,14 +28,7 @@ void UpdateConfig() {
     if (now - g_LastConfigCheck > 2000) {
         std::ifstream config("C:\\temp\\breezip_config.txt");
         std::string line;
-        if (std::getline(config, line)) {
-            g_ForcePremium = (line == "true");
-        } else {
-            // Default auf true setzen für den Benutzer
-            std::ofstream out("C:\\temp\\breezip_config.txt");
-            out << "true";
-            g_ForcePremium = true;
-        }
+        if (std::getline(config, line)) g_ForcePremium = (line == "true");
         g_LastConfigCheck = now;
     }
 }
@@ -57,11 +50,35 @@ std::string WStringToString(const std::wstring& wstr) {
     return strTo;
 }
 
-// --- JSON OVERKILL ---
+// --- STORE API HOOKS (Sichern gegen alle Pfade) ---
+
+// get_IsActive (Index 7)
+typedef HRESULT (STDMETHODCALLTYPE *get_IsActive_t)(void* This, bool *value);
+get_IsActive_t pOriginal_get_IsActive = nullptr;
+HRESULT STDMETHODCALLTYPE Detour_get_IsActive(void* This, bool *value) {
+    HRESULT hr = pOriginal_get_IsActive(This, value);
+    UpdateConfig();
+    if (g_ForcePremium) {
+        *value = true;
+        Logger::Log("[SPOOF] API: get_IsActive -> TRUE");
+    }
+    return hr;
+}
+
+// IStoreAppLicense / ILicenseInformation VTable Hooking
+void HookLicenseObject(void* pLicense) {
+    if (!pLicense) return;
+    void** vtable = *(void***)pLicense;
+    if (MH_CreateHook(vtable[7], &Detour_get_IsActive, reinterpret_cast<LPVOID*>(&pOriginal_get_IsActive)) == MH_OK) {
+        MH_EnableHook(vtable[7]);
+        Logger::Log("[HOOK] IsActive Hook installiert.");
+    }
+}
+
+// --- JSON HOOKS (SINGULARITY EDITION) ---
 
 typedef HRESULT (STDMETHODCALLTYPE *GetNamedBoolean_t)(void* This, HSTRING name, bool *value);
 GetNamedBoolean_t pOriginal_GetNamedBoolean = nullptr;
-
 HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool *value) {
     HRESULT hr = pOriginal_GetNamedBoolean(This, name, value);
     if (SUCCEEDED(hr) && name) {
@@ -70,21 +87,9 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool 
             std::wstring ws(nStr);
             UpdateConfig();
             Logger::Log("[JSON-BOOL] " + WStringToString(ws) + " = " + std::string(*value ? "TRUE" : "FALSE"));
-
-            if (g_ForcePremium) {
-                // Aggressives Spoofing
-                if (ws.find(L"Premium") != std::wstring::npos ||
-                    ws.find(L"active") != std::wstring::npos ||
-                    ws.find(L"pro") != std::wstring::npos ||
-                    ws.find(L"License") != std::wstring::npos ||
-                    ws.find(L"IsProtected") != std::wstring::npos ||
-                    ws.find(L"success") != std::wstring::npos) {
-
-                    if (*value == false) {
-                        *value = true;
-                        Logger::Log("[MANIPULATION] '" + WStringToString(ws) + "' auf TRUE erzwungen.");
-                    }
-                }
+            if (g_ForcePremium && (ws.find(L"Premium") != std::wstring::npos || ws.find(L"active") != std::wstring::npos || ws.find(L"License") != std::wstring::npos)) {
+                *value = true;
+                Logger::Log("[MANIPULATION] '" + WStringToString(ws) + "' -> TRUE");
             }
         }
     }
@@ -93,7 +98,6 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool 
 
 typedef HRESULT (STDMETHODCALLTYPE *GetNamedString_t)(void* This, HSTRING name, HSTRING *value);
 GetNamedString_t pOriginal_GetNamedString = nullptr;
-
 HRESULT STDMETHODCALLTYPE Detour_GetNamedString(void* This, HSTRING name, HSTRING *value) {
     HRESULT hr = pOriginal_GetNamedString(This, name, value);
     if (SUCCEEDED(hr) && name && value && *value) {
@@ -102,15 +106,12 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedString(void* This, HSTRING name, HSTRIN
         if (nStr && vStr) {
             std::wstring wn(nStr), wv(vStr);
             Logger::Log("[JSON-STRING] " + WStringToString(wn) + " = \"" + WStringToString(wv) + "\"");
-
             UpdateConfig();
             if (g_ForcePremium) {
-                if (wn == L"status" || wn == L"type" || wn == L"Value" || wn == L"licenseType") {
-                    if (wv == L"none" || wv == L"expired" || wv == L"free" || wv == L"trial") {
-                        WindowsDeleteString(*value);
-                        WindowsCreateString(L"Premium", 7, value);
-                        Logger::Log("[MANIPULATION] '" + WStringToString(wn) + "' von '" + WStringToString(wv) + "' auf 'Premium' geändert.");
-                    }
+                if (wv == L"none" || wv == L"expired" || wv == L"free" || wv == L"trial" || wv == L"expired_trial") {
+                    WindowsDeleteString(*value);
+                    WindowsCreateString(L"active", 6, value); // Oder "Premium"
+                    Logger::Log("[MANIPULATION] '" + WStringToString(wn) + "' manipuliert zu 'active'.");
                 }
             }
         }
@@ -118,11 +119,10 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedString(void* This, HSTRING name, HSTRIN
     return hr;
 }
 
-// --- ACTIVATION ---
+// --- ACTIVATION / COM ---
 
 typedef HRESULT (WINAPI *RoActivateInstance_t)(HSTRING activatableClassId, IInspectable** instance);
 RoActivateInstance_t pOriginal_RoActivateInstance = nullptr;
-
 HRESULT WINAPI Detour_RoActivateInstance(HSTRING activatableClassId, IInspectable** instance) {
     HRESULT hr = pOriginal_RoActivateInstance(activatableClassId, instance);
     if (SUCCEEDED(hr) && instance && *instance && activatableClassId) {
@@ -130,39 +130,41 @@ HRESULT WINAPI Detour_RoActivateInstance(HSTRING activatableClassId, IInspectabl
         if (classStr) {
             std::wstring ws(classStr);
             Logger::Log("[ACTIVATE] " + WStringToString(ws));
-
+            void** vtable = *(void***)*instance;
             if (ws == L"Windows.Data.Json.JsonObject") {
-                void** vtable = *(void***)*instance;
-                // Index 10: GetNamedString, Index 12: GetNamedBoolean
                 MH_CreateHook(vtable[10], &Detour_GetNamedString, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedString));
                 MH_EnableHook(vtable[10]);
                 MH_CreateHook(vtable[12], &Detour_GetNamedBoolean, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedBoolean));
                 MH_EnableHook(vtable[12]);
+            } else if (ws.find(L"StoreAppLicense") != std::wstring::npos || ws.find(L"LicenseInformation") != std::wstring::npos) {
+                HookLicenseObject(*instance);
             }
         }
     }
     return hr;
 }
 
-// --- COM ---
 typedef HRESULT (WINAPI *CoCreateInstance_t)(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWORD dwClsContext, REFIID riid, LPVOID *ppv);
 CoCreateInstance_t pOriginal_CoCreateInstance = nullptr;
-
 HRESULT WINAPI Detour_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWORD dwClsContext, REFIID riid, LPVOID *ppv) {
     HRESULT hr = pOriginal_CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv);
-    LPOLESTR clsidStr = NULL;
-    StringFromCLSID(rclsid, &clsidStr);
-    if (clsidStr) {
-        std::wstring ws(clsidStr);
-        Logger::Log("[COM] CoCreateInstance CLSID: " + WStringToString(ws));
-        CoTaskMemFree(clsidStr);
+    if (SUCCEEDED(hr) && ppv && *ppv) {
+        LPOLESTR clsidStr = NULL;
+        StringFromCLSID(rclsid, &clsidStr);
+        if (clsidStr) {
+            std::wstring ws(clsidStr);
+            // Bekannte CLSIDs prüfen
+            if (ws == L"{00000339-0000-0000-C000-000000000046}") { /* PropertySet */ }
+            Logger::Log("[COM] CLSID: " + WStringToString(ws));
+            CoTaskMemFree(clsidStr);
+        }
     }
     return hr;
 }
 
 void HookThread() {
     Logger::Init("C:\\temp\\breezip_analysis.log");
-    Logger::Log("=== BreeZip v4.5 'BRUTE FORCE' GESTARTET ===");
+    Logger::Log("=== BreeZip v6.0 'SINGULARITY' GESTARTET ===");
     Sleep(2000);
     MH_Initialize();
 
@@ -179,8 +181,7 @@ void HookThread() {
         MH_CreateHook(pCoCreate, &Detour_CoCreateInstance, reinterpret_cast<LPVOID*>(&pOriginal_CoCreateInstance));
         MH_EnableHook(pCoCreate);
     }
-
-    Logger::Log("[ULTIMATE] Brute Force Hooks aktiv.");
+    Logger::Log("[ULTIMATE] Singularity Mode scharfgeschaltet.");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
