@@ -2,11 +2,13 @@
 #include <chrono>
 #include <iomanip>
 #include <ctime>
+#include <iostream>
 
-std::string Logger::logFile = "C:\\temp\\breezip_log.txt";
+std::string Logger::logFile = "analysis.log";
 std::mutex Logger::logMutex;
 
 void Logger::Init(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(logMutex);
     logFile = filename;
 }
 
@@ -18,8 +20,9 @@ void Logger::Log(const std::string& message) {
         auto in_time_t = std::chrono::system_clock::to_time_t(now);
 
         std::tm bt{};
-        localtime_s(&bt, &in_time_t); // Sicherere Version für MSVC
+        localtime_s(&bt, &in_time_t);
 
         ofs << std::put_time(&bt, "%Y-%m-%d %X") << " - " << message << std::endl;
+        ofs.flush(); // Erzwinge das Schreiben auf die Festplatte
     }
 }

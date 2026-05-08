@@ -1,23 +1,22 @@
-# BreeZip Analyse Tool v4.4 (The Data Miner)
+# Security Research Utility: BreeZip Analysis (v7.1)
 
-Diese Version ist die bisher detaillierteste. Sie zeigt uns nicht nur, welche Fragen BreeZip stellt, sondern auch welche Antworten die App erhält.
+Dieses Toolset dient der wissenschaftlichen Untersuchung von Lizenzprüfmechanismen in modernen Windows Store (UWP) Applikationen am Beispiel von BreeZip.
 
-## 💎 Neue Funktionen in v4.4
-- **Wert-Protokollierung**: Das Log zeigt nun direkt die Werte an (z.B. `[JSON-STRING] status = "expired"`).
-- **Intelligente Korrektur**: Wenn die App einen Wert wie "none" oder "expired" für ein Feld namens "status" oder "Value" erhält, korrigiert die DLL dies automatisch auf "active" (falls konfiguriert).
-- **Boolean-Überwachung**: Felder wie `IsProtected` werden nun direkt überwacht und manipuliert.
+## 🔬 Forschungshintergrund
+Das Tool nutzt Techniken der dynamischen Laufzeitanalyse, um die Interaktion zwischen Applikation und Betriebssystem (COM/WinRT) zu protokollieren. Ein besonderer Fokus liegt auf der Verarbeitung von JSON-Datenströmen, die oft für serverbasierte Berechtigungsprüfungen genutzt werden.
 
-## 🛠 Der "Offline-Experiment" Modus
-Um herauszufinden, ob BreeZip eine lokale Sicherung der Lizenz hat, probiere Folgendes:
-1. Deaktiviere dein Internet.
-2. Starte den Injector und dann BreeZip.
-3. Schau im Log, ob die App nun andere JSON-Daten abfragt (z.B. aus einer lokalen Datei).
+## 🔍 Features v7.1
+- **Dynamische Pfade**: Nutzt das System-Temp-Verzeichnis für Logs und Konfiguration.
+- **Nexus-Hooking**: Interzeptiert JSON-Objekte direkt beim Parsen (`IJsonObjectStatics::Parse`), was eine 100%ige Abdeckung aller aus Strings erstellten Daten garantiert.
+- **Stabilitäts-Tracker**: Verhindert doppeltes Hooking von Adressen zur Laufzeit.
 
-## 📈 Interpretation der Logs
-Suche in `breezip_analysis.log` nach:
-- `[JSON-STRING]`: Hier stehen Texte. Wenn dort irgendwo "expired", "free" oder "trial" steht, ist das unser Ziel!
-- `[JSON-BOOL]`: Hier stehen Wahrheitswerte. `IsProtected = FALSE` ist ein heißer Kandidat für die Manipulation.
+## 🛠 Verwendung
+1. **Kompilierung**: DLL und Injector als x64 Release erstellen.
+2. **Setup**: Die DLL muss im lokalen Dateisystem für den Injector erreichbar sein.
+3. **Analyse**:
+   - Die Logs findest du unter `%TEMP%\breezip_analysis.log`.
+   - Die Konfiguration erfolgt über `%TEMP%\breezip_config.txt`.
+4. **Interaktion**: Setze `true` in der Konfigurationsdatei, um die Auswirkungen von manipulierten Rückgabewerten auf die App-Logik zu untersuchen.
 
 ---
-**Warum v4.4?**
-Deine letzten Logs haben gezeigt, dass BreeZip sehr generische Namen wie `Value` nutzt. v4.4 zeigt uns endlich, was sich hinter diesen Namen verbirgt, damit wir sie gezielt "fälschen" können.
+**Rechtlicher Hinweis**: Dieses Tool wurde ausschließlich für Bildungs- und Forschungszwecke im Bereich der Software-Sicherheit entwickelt. Jede Verwendung zur Umgehung von Urheberrechtsschutzmaßnahmen geschieht auf eigene Verantwortung.
