@@ -1,25 +1,18 @@
-# BreeZip Analyse & Manipulation Tool v3.2 (Final Release)
+# BreeZip Analyse Tool v3.3.1 (Performance Update)
 
-Dies ist die stabilste und am weitesten entwickelte Version des Tools.
+Dies ist die optimierte Version des "Deep Observers", die speziell auf die Analyse von JSON-basierten Lizenzprüfungen ausgelegt ist.
 
-## 🌟 Was ist neu in v3.2?
-- **Korrekte VTable-Pfade**: Die internen Adressen für die Lizenzprüfung wurden präzisiert, um Abstürze zu verhindern und die Zuverlässigkeit zu erhöhen.
-- **Dual-API Support**: Die DLL erkennt nun automatisch, ob BreeZip die moderne `Windows.Services.Store` API oder die ältere `Windows.ApplicationModel.Store` API nutzt und hookt den entsprechenden Pfad.
-- **Detailliertes Reporting**: Das Log zeigt nun genau an, welche WinRT-Klassen die App anfordert (`[SCANNER] App fordert an...`).
+## 🚀 Verbesserungen in v3.3.1
+- **Performance**: Die Konfiguration wird nun gecacht und nicht mehr bei jedem Hook-Aufruf von der Festplatte gelesen. Das verhindert Ruckeln in der App.
+- **Präzision**: Der VTable-Index für JSON-Abfragen wurde auf Index 12 korrigiert.
+- **Stabilität**: Sicherheitschecks für Null-Pointer wurden hinzugefügt.
 
-## 🛠 Anleitung
-
-1. **Einrichtung**: Kopiere die `breezip_hook.dll` nach `C:\temp\`.
-2. **Watchdog**: Starte den `injector.exe` als Administrator.
-3. **Start**: Öffne BreeZip.
-4. **Ergebnis**:
-   - Schau in das Log: `C:\temp\breezip_analysis.log`.
-   - Wenn du dort siehst: `[HOOK] get_IsActive (Index 7) installiert`, dann hat das Tool die Lizenzprüfung erfolgreich im Griff.
-5. **Manipulation**: Schreibe `true` in `C:\temp\breezip_config.txt`, um Premium freizuschalten.
-
-## 📘 Fehlerbehebung
-- **Keine Logs nach "RoGetActivationFactory aktiv"**: Das bedeutet, BreeZip hat noch keine Lizenzprüfung gestartet. Klicke in der App auf ein Premium-Feature, um die Prüfung auszulösen.
-- **App stürzt ab**: Stelle sicher, dass du die DLL als **x64 Release** kompiliert hast.
+## 🛠 Verwendung
+1. **Injector**: Zuerst starten (Administrator).
+2. **BreeZip**: Danach starten.
+3. **Analyse**: Beobachte das Log. Die App wird wahrscheinlich viele JSON-Werte abfragen.
+4. **Manipulation**: Wenn `C:\temp\breezip_config.txt` auf `true` steht, werden Variablen wie `isPremium`, `active`, `pro` etc. im JSON-Objekt automatisch auf `true` gesetzt.
 
 ---
-*Viel Erfolg bei deiner Analyse! Diese Version deckt alle offiziellen Lizenzpfade von Microsoft Store Apps ab.*
+**Hintergrund**:
+Da wir in deinen Logs gesehen haben, dass die App viel mit JSON arbeitet, ist dies der "geheime" Weg, den BreeZip wahrscheinlich nutzt, um den Lizenzstatus vom Server zu prüfen. v3.3.1 klinkt sich direkt in den Moment ein, in dem die App diese Daten auswertet.
