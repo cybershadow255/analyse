@@ -5,22 +5,13 @@
 #include <tlhelp32.h>
 #include <aclapi.h>
 #include <sddl.h>
-#include <shlobj.h>
 
-void LogError(const std::wstring& msg) {
-    DWORD err = GetLastError();
-    std::wcerr << L"[!] " << msg << L" (Error Code: " << err << L")" << std::endl;
+void Log(const std::wstring& msg) {
+    std::wcout << L"[*] " << msg << std::endl;
 }
 
-// Stellt sicher, dass C:\temp\ existiert
-bool EnsureTempDir() {
-    if (!CreateDirectoryW(L"C:\\temp\\", NULL)) {
-        if (GetLastError() != ERROR_ALREADY_EXISTS) {
-            LogError(L"Konnte C:\\temp\\ nicht erstellen.");
-            return false;
-        }
-    }
-    return true;
+void LogError(const std::wstring& msg) {
+    std::wcerr << L"[!] " << msg << L" (Error: " << GetLastError() << L")" << std::endl;
 }
 
 bool SetAppContainerPermissions(std::wstring dllPath) {
@@ -29,16 +20,8 @@ bool SetAppContainerPermissions(std::wstring dllPath) {
     EXPLICIT_ACCESSW ea;
     PSID pSid = NULL;
 
-    if (GetNamedSecurityInfoW(dllPath.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pOldDACL, NULL, &pSD) != ERROR_SUCCESS) {
-        LogError(L"GetNamedSecurityInfo fehlgeschlagen");
-        return false;
-    }
-
-    if (!ConvertStringSidToSidW(L"S-1-15-2-1", &pSid)) {
-        LogError(L"ConvertStringSidToSid fehlgeschlagen");
-        LocalFree(pSD);
-        return false;
-    }
+    if (GetNamedSecurityInfoW(dllPath.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pOldDACL, NULL, &pSD) != ERROR_SUCCESS) return false;
+    ConvertStringSidToSidW(L"S-1-15-2-1", &pSid);
 
     ZeroMemory(&ea, sizeof(EXPLICIT_ACCESSW));
     ea.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
@@ -48,16 +31,8 @@ bool SetAppContainerPermissions(std::wstring dllPath) {
     ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
     ea.Trustee.ptstrName = (LPWSTR)pSid;
 
-    if (SetEntriesInAclW(1, &ea, pOldDACL, &pNewDACL) != ERROR_SUCCESS) {
-        LogError(L"SetEntriesInAcl fehlgeschlagen");
-        FreeSid(pSid);
-        LocalFree(pSD);
-        return false;
-    }
-
-    if (SetNamedSecurityInfoW((LPWSTR)dllPath.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, pNewDACL, NULL) != ERROR_SUCCESS) {
-        LogError(L"SetNamedSecurityInfo fehlgeschlagen");
-    }
+    SetEntriesInAclW(1, &ea, pOldDACL, &pNewDACL);
+    SetNamedSecurityInfoW((LPWSTR)dllPath.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, pNewDACL, NULL);
 
     if (pSid) FreeSid(pSid);
     if (pNewDACL) LocalFree(pNewDACL);
@@ -84,55 +59,58 @@ DWORD GetProcessIdByName(std::wstring processName) {
     return pid;
 }
 
+bool Inject(DWORD pid, std::wstring dllPath) {
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!hProcess) return false;
+
+    void* pLibPath = VirtualAllocEx(hProcess, NULL, (dllPath.length() + 1) * sizeof(wchar_t), MEM_COMMIT, PAGE_READWRITE);
+    WriteProcessMemory(hProcess, pLibPath, dllPath.c_str(), (dllPath.length() + 1) * sizeof(wchar_t), NULL);
+
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryW"), pLibPath, 0, NULL);
+    if (!hThread) {
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    WaitForSingleObject(hThread, INFINITE);
+    CloseHandle(hThread);
+    CloseHandle(hProcess);
+    return true;
+}
+
 int main() {
     std::wstring processName = L"BreeZip.exe";
     std::wstring dllPath = L"C:\\temp\\breezip_hook.dll";
+    std::vector<DWORD> injectedPids;
 
-    std::wcout << L"--- UWP Injector v2.0 für BreeZip ---" << std::endl;
-
-    if (!EnsureTempDir()) return 1;
-
-    DWORD pid = GetProcessIdByName(processName);
-    if (pid == 0) {
-        std::wcerr << L"[!] BreeZip.exe wurde nicht gefunden. Starte die App zuerst!" << std::endl;
-        return 1;
-    }
-    std::wcout << L"[*] Zielprozess gefunden: PID " << pid << std::endl;
+    std::wcout << L"=== BreeZip Watchdog Injector v3.0 ===" << std::endl;
+    Log(L"Warte auf BreeZip Start...");
 
     if (!SetAppContainerPermissions(dllPath)) {
-        std::wcerr << L"[!] Fehler beim Setzen der DLL-Berechtigungen." << std::endl;
+        LogError(L"Berechtigungen konnten nicht gesetzt werden!");
         return 1;
     }
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProcess) {
-        LogError(L"OpenProcess fehlgeschlagen. Bitte als Administrator ausführen!");
-        return 1;
+    while (true) {
+        DWORD pid = GetProcessIdByName(processName);
+        if (pid != 0) {
+            bool alreadyInjected = false;
+            for (DWORD p : injectedPids) if (p == pid) alreadyInjected = true;
+
+            if (!alreadyInjected) {
+                Log(L"Neuer BreeZip Prozess gefunden (PID: " + std::to_wstring(pid) + L"). Injiziere...");
+                if (Inject(pid, dllPath)) {
+                    Log(L"Erfolgreich injiziert!");
+                    injectedPids.push_back(pid);
+                } else {
+                    LogError(L"Injection fehlgeschlagen.");
+                }
+            }
+        } else {
+            injectedPids.clear(); // Liste leeren wenn BreeZip geschlossen wurde
+        }
+        Sleep(1000);
     }
 
-    void* pLibPath = VirtualAllocEx(hProcess, NULL, (dllPath.length() + 1) * sizeof(wchar_t), MEM_COMMIT, PAGE_READWRITE);
-    if (!pLibPath) {
-        LogError(L"VirtualAllocEx fehlgeschlagen");
-        return 1;
-    }
-
-    if (!WriteProcessMemory(hProcess, pLibPath, dllPath.c_str(), (dllPath.length() + 1) * sizeof(wchar_t), NULL)) {
-        LogError(L"WriteProcessMemory fehlgeschlagen");
-        return 1;
-    }
-
-    void* pLoadLibraryW = GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryW");
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pLoadLibraryW, pLibPath, 0, NULL);
-
-    if (!hThread) {
-        LogError(L"CreateRemoteThread fehlgeschlagen");
-        return 1;
-    }
-
-    std::wcout << L"[*] DLL erfolgreich injiziert!" << std::endl;
-    std::wcout << L"[*] Prüfe C:\\temp\\breezip_analysis.log für Ergebnisse." << std::endl;
-
-    CloseHandle(hThread);
-    CloseHandle(hProcess);
     return 0;
 }
