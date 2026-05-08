@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <map>
 #include "logger.h"
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Data.Json.h>
@@ -16,16 +17,7 @@ using namespace winrt;
 using namespace Windows::Data::Json;
 using namespace Windows::Foundation;
 
-// --- HELPER ---
-std::string WStringToString(const std::wstring& wstr) {
-    if (wstr.empty()) return std::string();
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
-    std::string strTo(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
-    return strTo;
-}
-
-// --- CONFIG CACHE ---
+// --- CONFIG ---
 bool g_ForcePremium = false;
 std::mutex g_ConfigMutex;
 DWORD g_LastConfigCheck = 0;
@@ -33,11 +25,16 @@ DWORD g_LastConfigCheck = 0;
 void UpdateConfig() {
     std::lock_guard<std::mutex> lock(g_ConfigMutex);
     DWORD now = GetTickCount();
-    if (now - g_LastConfigCheck > 3000) {
+    if (now - g_LastConfigCheck > 2000) {
         std::ifstream config("C:\\temp\\breezip_config.txt");
         std::string line;
         if (std::getline(config, line)) {
             g_ForcePremium = (line == "true");
+        } else {
+            // Default auf true setzen für den Benutzer
+            std::ofstream out("C:\\temp\\breezip_config.txt");
+            out << "true";
+            g_ForcePremium = true;
         }
         g_LastConfigCheck = now;
     }
@@ -51,9 +48,49 @@ extern "C" {
     MH_STATUS WINAPI MH_EnableHook(LPVOID pTarget);
 }
 
-// --- JSON DETOURS (THE DATA MINER) ---
+// --- HELPER ---
+std::string WStringToString(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
 
-// GetNamedString (Index 10)
+// --- JSON OVERKILL ---
+
+typedef HRESULT (STDMETHODCALLTYPE *GetNamedBoolean_t)(void* This, HSTRING name, bool *value);
+GetNamedBoolean_t pOriginal_GetNamedBoolean = nullptr;
+
+HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool *value) {
+    HRESULT hr = pOriginal_GetNamedBoolean(This, name, value);
+    if (SUCCEEDED(hr) && name) {
+        PCWSTR nStr = WindowsGetStringRawBuffer(name, nullptr);
+        if (nStr) {
+            std::wstring ws(nStr);
+            UpdateConfig();
+            Logger::Log("[JSON-BOOL] " + WStringToString(ws) + " = " + std::string(*value ? "TRUE" : "FALSE"));
+
+            if (g_ForcePremium) {
+                // Aggressives Spoofing
+                if (ws.find(L"Premium") != std::wstring::npos ||
+                    ws.find(L"active") != std::wstring::npos ||
+                    ws.find(L"pro") != std::wstring::npos ||
+                    ws.find(L"License") != std::wstring::npos ||
+                    ws.find(L"IsProtected") != std::wstring::npos ||
+                    ws.find(L"success") != std::wstring::npos) {
+
+                    if (*value == false) {
+                        *value = true;
+                        Logger::Log("[MANIPULATION] '" + WStringToString(ws) + "' auf TRUE erzwungen.");
+                    }
+                }
+            }
+        }
+    }
+    return hr;
+}
+
 typedef HRESULT (STDMETHODCALLTYPE *GetNamedString_t)(void* This, HSTRING name, HSTRING *value);
 GetNamedString_t pOriginal_GetNamedString = nullptr;
 
@@ -67,11 +104,13 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedString(void* This, HSTRING name, HSTRIN
             Logger::Log("[JSON-STRING] " + WStringToString(wn) + " = \"" + WStringToString(wv) + "\"");
 
             UpdateConfig();
-            if (g_ForcePremium && (wn == L"Value" || wn == L"status")) {
-                if (wv == L"none" || wv == L"false" || wv == L"expired") {
-                    WindowsDeleteString(*value);
-                    WindowsCreateString(L"active", 6, value);
-                    Logger::Log("[MANIPULATION] JSON String '" + WStringToString(wn) + "' auf 'active' gesetzt!");
+            if (g_ForcePremium) {
+                if (wn == L"status" || wn == L"type" || wn == L"Value" || wn == L"licenseType") {
+                    if (wv == L"none" || wv == L"expired" || wv == L"free" || wv == L"trial") {
+                        WindowsDeleteString(*value);
+                        WindowsCreateString(L"Premium", 7, value);
+                        Logger::Log("[MANIPULATION] '" + WStringToString(wn) + "' von '" + WStringToString(wv) + "' auf 'Premium' geändert.");
+                    }
                 }
             }
         }
@@ -79,29 +118,8 @@ HRESULT STDMETHODCALLTYPE Detour_GetNamedString(void* This, HSTRING name, HSTRIN
     return hr;
 }
 
-// GetNamedBoolean (Index 12)
-typedef HRESULT (STDMETHODCALLTYPE *GetNamedBoolean_t)(void* This, HSTRING name, bool *value);
-GetNamedBoolean_t pOriginal_GetNamedBoolean = nullptr;
+// --- ACTIVATION ---
 
-HRESULT STDMETHODCALLTYPE Detour_GetNamedBoolean(void* This, HSTRING name, bool *value) {
-    HRESULT hr = pOriginal_GetNamedBoolean(This, name, value);
-    if (SUCCEEDED(hr) && name) {
-        PCWSTR nStr = WindowsGetStringRawBuffer(name, nullptr);
-        if (nStr) {
-            std::wstring ws(nStr);
-            Logger::Log("[JSON-BOOL] " + WStringToString(ws) + " = " + std::string(*value ? "TRUE" : "FALSE"));
-
-            UpdateConfig();
-            if (g_ForcePremium && (ws == L"IsProtected" || ws == L"active" || ws.find(L"Premium") != std::wstring::npos)) {
-                *value = true;
-                Logger::Log("[MANIPULATION] JSON Bool '" + WStringToString(ws) + "' -> TRUE");
-            }
-        }
-    }
-    return hr;
-}
-
-// --- ACTIVATION DETOURS ---
 typedef HRESULT (WINAPI *RoActivateInstance_t)(HSTRING activatableClassId, IInspectable** instance);
 RoActivateInstance_t pOriginal_RoActivateInstance = nullptr;
 
@@ -111,23 +129,27 @@ HRESULT WINAPI Detour_RoActivateInstance(HSTRING activatableClassId, IInspectabl
         PCWSTR classStr = WindowsGetStringRawBuffer(activatableClassId, nullptr);
         if (classStr) {
             std::wstring ws(classStr);
+            Logger::Log("[ACTIVATE] " + WStringToString(ws));
+
             if (ws == L"Windows.Data.Json.JsonObject") {
                 void** vtable = *(void***)*instance;
+                // Index 10: GetNamedString, Index 12: GetNamedBoolean
                 MH_CreateHook(vtable[10], &Detour_GetNamedString, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedString));
                 MH_EnableHook(vtable[10]);
                 MH_CreateHook(vtable[12], &Detour_GetNamedBoolean, reinterpret_cast<LPVOID*>(&pOriginal_GetNamedBoolean));
                 MH_EnableHook(vtable[12]);
-                Logger::Log("[HOOK] JSON Data-Miner aktiv.");
             }
         }
     }
     return hr;
 }
 
+// --- COM ---
 typedef HRESULT (WINAPI *CoCreateInstance_t)(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWORD dwClsContext, REFIID riid, LPVOID *ppv);
 CoCreateInstance_t pOriginal_CoCreateInstance = nullptr;
 
 HRESULT WINAPI Detour_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWORD dwClsContext, REFIID riid, LPVOID *ppv) {
+    HRESULT hr = pOriginal_CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv);
     LPOLESTR clsidStr = NULL;
     StringFromCLSID(rclsid, &clsidStr);
     if (clsidStr) {
@@ -135,12 +157,12 @@ HRESULT WINAPI Detour_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWO
         Logger::Log("[COM] CoCreateInstance CLSID: " + WStringToString(ws));
         CoTaskMemFree(clsidStr);
     }
-    return pOriginal_CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv);
+    return hr;
 }
 
 void HookThread() {
     Logger::Init("C:\\temp\\breezip_analysis.log");
-    Logger::Log("=== BreeZip v4.4 'The Data Miner' gestartet ===");
+    Logger::Log("=== BreeZip v4.5 'BRUTE FORCE' GESTARTET ===");
     Sleep(2000);
     MH_Initialize();
 
@@ -157,6 +179,8 @@ void HookThread() {
         MH_CreateHook(pCoCreate, &Detour_CoCreateInstance, reinterpret_cast<LPVOID*>(&pOriginal_CoCreateInstance));
         MH_EnableHook(pCoCreate);
     }
+
+    Logger::Log("[ULTIMATE] Brute Force Hooks aktiv.");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
